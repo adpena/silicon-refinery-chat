@@ -127,7 +127,8 @@ if [[ "$ARTIFACT_PATH" == *.dmg ]]; then
   if [[ -n "$APP_PATH" && -d "$APP_PATH" ]]; then
     log "Verifying app bundle: $(basename "$APP_PATH")"
     codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-    if ! codesign -d --verbose=4 "$APP_PATH" 2>&1 | grep -Eq "runtime|Runtime Version"; then
+    codesign_details="$(codesign -d --verbose=4 "$APP_PATH" 2>&1 || true)"
+    if ! grep -Eq "runtime|Runtime Version" <<<"$codesign_details"; then
       echo "Error: hardened runtime flag not detected in app signature." >&2
       exit 1
     fi
