@@ -65,7 +65,18 @@ require_cmd spctl
 
 NOTARY_ARGS=()
 if [[ -n "${APPLE_NOTARY_PROFILE:-}" ]]; then
-  NOTARY_ARGS=(--keychain-profile "$APPLE_NOTARY_PROFILE")
+  if xcrun notarytool history --keychain-profile "$APPLE_NOTARY_PROFILE" --output-format json >/dev/null 2>&1; then
+    NOTARY_ARGS=(--keychain-profile "$APPLE_NOTARY_PROFILE")
+  elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]]; then
+    log "Keychain profile '${APPLE_NOTARY_PROFILE}' is unavailable; falling back to APPLE_ID credentials."
+    NOTARY_ARGS=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD")
+  elif [[ -n "${APPLE_NOTARY_KEY_PATH:-}" && -n "${APPLE_NOTARY_KEY_ID:-}" && -n "${APPLE_NOTARY_ISSUER:-}" ]]; then
+    log "Keychain profile '${APPLE_NOTARY_PROFILE}' is unavailable; falling back to App Store Connect API key credentials."
+    NOTARY_ARGS=(--key "$APPLE_NOTARY_KEY_PATH" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER")
+  else
+    echo "Error: APPLE_NOTARY_PROFILE is set but not available in this keychain, and no fallback notarization credentials were provided." >&2
+    exit 1
+  fi
 elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]]; then
   NOTARY_ARGS=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD")
 elif [[ -n "${APPLE_NOTARY_KEY_PATH:-}" && -n "${APPLE_NOTARY_KEY_ID:-}" && -n "${APPLE_NOTARY_ISSUER:-}" ]]; then
