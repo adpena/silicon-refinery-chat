@@ -179,9 +179,7 @@ def derive_chat_title(query: str) -> str:
         """Title-case words without upper-casing letters after apostrophes."""
         parts = word.split("'")
         first = parts[0]
-        normalized_first = (
-            first[:1].upper() + first[1:].lower() if first else ""
-        )
+        normalized_first = first[:1].upper() + first[1:].lower() if first else ""
         if len(parts) == 1:
             return normalized_first
         normalized_rest = [part.lower() for part in parts[1:]]
@@ -2118,8 +2116,7 @@ class SiliconRefineryChatApp(toga.App):
 
         except TimeoutError as exc:
             final_assistant_text = (
-                "The local model timed out while streaming this response. "
-                "Please retry."
+                "The local model timed out while streaming this response. Please retry."
             )
             assistant_message["content"] = final_assistant_text
             self._render_transcript()
