@@ -43,6 +43,9 @@ STREAM_UI_BREAK_CHARS = {".", "!", "?", ":", ";", "\n"}
 QUERY_PREVIEW_STEP_CHARS = 12
 QUERY_PREVIEW_INTERVAL_SECONDS = 0.008
 MAX_STREAM_RESTARTS = 5
+STREAM_FIRST_CHUNK_TIMEOUT_SECONDS = 25.0
+STREAM_CHUNK_IDLE_TIMEOUT_SECONDS = 12.0
+STREAM_WORKER_JOIN_TIMEOUT_SECONDS = 0.4
 LOADING_SHIMMER_FRAMES = [
     "░░▒▒▓▓▒▒",
     "░▒▒▓▓▒▒░",
@@ -77,6 +80,7 @@ COLOR_TEXT_SECONDARY = "#D4DEEA"
 COLOR_TEXT_MUTED = "#9AA8BC"
 COLOR_TAB_IDLE = "#1A2736"
 COLOR_TAB_ACTIVE = "#29445F"
+SIDEBAR_TITLE_TEXT = "SiliconRefineryChat -Apple Foundation Models"
 
 
 def configure_theme_for_mode(dark_mode: bool | None) -> None:
@@ -170,7 +174,20 @@ def derive_chat_title(query: str) -> str:
     words = re.findall(r"[A-Za-z0-9']+", query)
     if not words:
         return "Untitled Chat"
-    title = " ".join(words[:8]).strip().title()
+
+    def normalize_word(word: str) -> str:
+        """Title-case words without upper-casing letters after apostrophes."""
+        parts = word.split("'")
+        first = parts[0]
+        normalized_first = (
+            first[:1].upper() + first[1:].lower() if first else ""
+        )
+        if len(parts) == 1:
+            return normalized_first
+        normalized_rest = [part.lower() for part in parts[1:]]
+        return "'".join([normalized_first, *normalized_rest])
+
+    title = " ".join(normalize_word(word) for word in words[:8]).strip()
     if len(title) <= 60:
         return title
     compact = title[:60].rsplit(" ", 1)[0].strip()
@@ -898,25 +915,13 @@ class SiliconRefineryChatApp(toga.App):
 
     def _wrapped_sidebar_title(self, sidebar_width: int) -> str:
         """Wrap the sidebar title manually to avoid clipping on narrower widths."""
-        words = ["SiliconRefinery", "Local", "FM", "Chat"]
-        if not words:
-            return ""
-        max_chars = max(14, min(24, int((sidebar_width - 40) / 11)))
-        lines: list[str] = []
-        current: list[str] = []
-        current_len = 0
-        for word in words:
-            proposed = len(word) if not current else current_len + len(word) + 1
-            if current and proposed > max_chars:
-                lines.append(" ".join(current))
-                current = [word]
-                current_len = len(word)
-                continue
-            current.append(word)
-            current_len = proposed
-        if current:
-            lines.append(" ".join(current))
-        return "\n".join(lines)
+        max_chars = max(16, min(34, int((sidebar_width - 34) / 8.5)))
+        return textwrap.fill(
+            SIDEBAR_TITLE_TEXT,
+            width=max_chars,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
 
     def _apply_responsive_layout(self) -> None:
         """Adjust widths/heights for current window size."""
@@ -1199,7 +1204,7 @@ class SiliconRefineryChatApp(toga.App):
                 flex=1,
                 color=COLOR_TEXT_SECONDARY,
                 font_size=FONT_SIZE_BODY,
-                margin=(2, 0, 0, 4),
+                margin=(2, 8, 0, 8),
             ),
         )
         self.loading_spinner = toga.ActivityIndicator(
@@ -1207,7 +1212,7 @@ class SiliconRefineryChatApp(toga.App):
             style=Pack(
                 width=14,
                 height=14,
-                margin=(2, 8, 0, 4),
+                margin=(0, 10, 0, 8),
                 visibility=HIDDEN,
             ),
         )
@@ -1216,22 +1221,29 @@ class SiliconRefineryChatApp(toga.App):
             style=Pack(
                 color=COLOR_ACCENT,
                 font_size=FONT_SIZE_META,
-                margin=(4, 8, 2, 8),
+                margin=(2, 8, 4, 8),
                 visibility=HIDDEN,
             ),
         )
-        self.status_panel = toga.Box(
+        self.status_text_column = toga.Box(
             style=Pack(
                 direction=COLUMN,
+                flex=1,
+                justify_content="center",
+            )
+        )
+        self.status_text_column.add(self.status_label)
+        self.status_text_column.add(self.loading_label)
+        self.status_panel = toga.Box(
+            style=Pack(
+                direction=ROW,
+                align_items="center",
                 margin=(12, 14, 14, 14),
                 background_color=COLOR_ACCENT_SOFT,
             )
         )
-        status_row = toga.Box(style=Pack(direction=ROW, margin=(0, 4, 0, 4)))
-        status_row.add(self.status_label)
-        status_row.add(self.loading_spinner)
-        self.status_panel.add(status_row)
-        self.status_panel.add(self.loading_label)
+        self.status_panel.add(self.status_text_column)
+        self.status_panel.add(self.loading_spinner)
 
         self.transcript_view = toga.MultilineTextInput(
             readonly=True,
@@ -1653,6 +1665,7 @@ class SiliconRefineryChatApp(toga.App):
         """Run SDK streaming on a worker thread and forward snapshots to UI loop."""
         ui_loop = asyncio.get_running_loop()
         event_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        worker_done = threading.Event()
 
         def producer_sync() -> None:
             async def producer() -> None:
@@ -1675,13 +1688,33 @@ class SiliconRefineryChatApp(toga.App):
                 asyncio.run(producer())
             except Exception as exc:
                 ui_loop.call_soon_threadsafe(event_queue.put_nowait, ("error", exc))
+            finally:
+                worker_done.set()
 
-        worker_future = ui_loop.run_in_executor(self._worker_pool, producer_sync)
+        worker_thread = threading.Thread(
+            target=producer_sync,
+            name="lfc-stream-worker",
+            daemon=True,
+        )
+        worker_thread.start()
+        first_chunk_seen = False
 
         try:
             while True:
-                kind, payload = await event_queue.get()
+                timeout = (
+                    STREAM_CHUNK_IDLE_TIMEOUT_SECONDS
+                    if first_chunk_seen
+                    else STREAM_FIRST_CHUNK_TIMEOUT_SECONDS
+                )
+                try:
+                    kind, payload = await asyncio.wait_for(event_queue.get(), timeout=timeout)
+                except TimeoutError as exc:
+                    label = "response stream" if first_chunk_seen else "first response chunk"
+                    raise TimeoutError(
+                        f"Timed out waiting for {label} after {timeout:.0f}s."
+                    ) from exc
                 if kind == "chunk":
+                    first_chunk_seen = True
                     yield str(payload)
                     continue
                 if kind == "error":
@@ -1691,8 +1724,11 @@ class SiliconRefineryChatApp(toga.App):
                 break
         finally:
             cancel_event.set()
-            with contextlib.suppress(asyncio.TimeoutError, Exception):
-                await asyncio.wait_for(worker_future, timeout=0.5)
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    worker_done.wait,
+                    STREAM_WORKER_JOIN_TIMEOUT_SECONDS,
+                )
 
     def _set_idle_state(self) -> None:
         """Reset chat view to fresh state."""
@@ -1975,6 +2011,7 @@ class SiliconRefineryChatApp(toga.App):
         self._pending_steering_interjection = ""
 
         final_assistant_text = ""
+        final_status_text = ""
         restart_count = 0
         query_stream_task: asyncio.Task | None = None
 
@@ -2079,10 +2116,19 @@ class SiliconRefineryChatApp(toga.App):
                 assistant_message["content"] = final_assistant_text
                 self._render_transcript()
 
+        except TimeoutError as exc:
+            final_assistant_text = (
+                "The local model timed out while streaming this response. "
+                "Please retry."
+            )
+            assistant_message["content"] = final_assistant_text
+            self._render_transcript()
+            final_status_text = str(exc)
         except Exception as exc:
             final_assistant_text = f"Local model error: {exc}"
             assistant_message["content"] = final_assistant_text
             self._render_transcript()
+            final_status_text = str(exc)
             await self.main_window.dialog(toga.ErrorDialog("Generation error", str(exc)))
         finally:
             if query_stream_task is not None and not query_stream_task.done():
@@ -2097,9 +2143,11 @@ class SiliconRefineryChatApp(toga.App):
             self._pending_steering_interjection = ""
             self._set_busy(False)
 
+        if not final_status_text:
+            final_status_text = f"Response streamed (restarts={restart_count})."
         self.store.add_message(self.current_chat_id, "assistant", final_assistant_text)
         self._refresh_chat_tabs(selected_chat_id=self.current_chat_id)
-        self._set_status_text(f"Response streamed (restarts={restart_count}).")
+        self._set_status_text(final_status_text)
 
     def on_exit(self) -> bool:
         """Close sqlite connection when app exits."""
