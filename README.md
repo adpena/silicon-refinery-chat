@@ -51,6 +51,7 @@ APPLE_NOTARY_PROFILE="<YOUR_NOTARY_PROFILE>" \
 Packaged artifacts are published under `artifacts/` in this repo and attached to GitHub Releases.
 
 Ad-hoc builds are for local testing only. Public distribution should always use Developer ID signing + notarization to avoid Gatekeeper malware verification warnings during install.
+The parent publish pipeline now blocks release uploads for untrusted artifacts by default (ad-hoc, unstapled, or non-notarized), unless `--allow-untrusted-release` is explicitly provided.
 
 ## Versioning
 
