@@ -28,8 +28,8 @@ silicon-refinery-chat
 ```text
 Actual output excerpt from local run:
 
-silicon-refinery-chat 0.0.214 installed=0.0.214
-silicon-refinery 0.0.214 installed=0.0.214
+silicon-refinery-chat 0.0.215 installed=0.0.215
+silicon-refinery 0.0.215 installed=0.0.215
 ```
 
 This installs `SiliconRefineryChat.app` and a `silicon-refinery-chat` launcher command.
@@ -64,7 +64,7 @@ The parent publish pipeline now blocks release uploads for untrusted artifacts b
 
 ## Versioning
 
-`silicon-refinery-chat` stays version-locked with `silicon-refinery` and uses thousandth-place increments (`0.0.213` -> `0.0.214`).
+`silicon-refinery-chat` stays version-locked with `silicon-refinery` and uses thousandth-place increments (`0.0.214` -> `0.0.215`).
 
 ## License
 

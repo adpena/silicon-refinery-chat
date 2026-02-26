@@ -997,8 +997,8 @@ class SiliconRefineryChatApp(toga.App):
 
     def _wrap_sidebar_text(self, text: str, sidebar_width: int, font_size: float) -> str:
         """Wrap sidebar text blocks based on current width and font size."""
-        available_px = max(120.0, float(sidebar_width) - 24.0)
-        approx_char_px = max(5.4, float(font_size) * 0.58)
+        available_px = max(112.0, float(sidebar_width) - 32.0)
+        approx_char_px = max(5.8, float(font_size) * 0.64)
         max_chars = max(16, int(available_px / approx_char_px))
         return textwrap.fill(
             text,
@@ -1032,8 +1032,13 @@ class SiliconRefineryChatApp(toga.App):
         )
         self.sidebar_title_label.text = title_text
         self.sidebar_subtitle_label.style.width = text_width
+        min_subtitle_height = self._text_block_height(
+            "x\nx\nx",
+            FONT_SIZE_META,
+            min_height=22,
+        )
         self.sidebar_subtitle_label.style.height = self._text_block_height(
-            subtitle_text, FONT_SIZE_META, min_height=22
+            subtitle_text, FONT_SIZE_META, min_height=min_subtitle_height
         )
         self.sidebar_subtitle_label.text = subtitle_text
 
@@ -1042,20 +1047,24 @@ class SiliconRefineryChatApp(toga.App):
         width = self._window_width()
         height = self._window_height()
         sidebar_width = max(220, min(350, int(width * 0.29)))
+        chat_tabs_height = max(190, min(420, int(height * 0.62)))
         if width < 1024 or height < 680:
             sidebar_width = max(200, min(286, int(width * 0.33)))
             self.transcript_view.style.height = 232
             self.prompt_input.style.height = 112
+            chat_tabs_height = max(170, min(340, int(height * 0.56)))
         else:
             self.transcript_view.style.height = 302
             self.prompt_input.style.height = 120
         if height < 560:
             self.transcript_view.style.height = 176
             self.prompt_input.style.height = 88
+            chat_tabs_height = max(140, min(280, int(height * 0.50)))
 
         self._sidebar_width = sidebar_width
         self._chat_tab_button_width = max(148, sidebar_width - 48)
         self.chat_column.style.width = sidebar_width
+        self.chat_tabs_scroll.style.height = chat_tabs_height
         self._apply_sidebar_header_layout(sidebar_width)
         if width < 980:
             self.status_panel.style.margin = (0, 14, 14, 14)
@@ -1352,7 +1361,7 @@ class SiliconRefineryChatApp(toga.App):
             vertical=True,
             content=self.chat_tabs_box,
             style=Pack(
-                flex=1,
+                height=300,
                 margin=(0, 10, 12, 10),
                 background_color=COLOR_PANEL_BG,
             ),
