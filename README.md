@@ -39,10 +39,18 @@ uv run briefcase dev
 ```bash
 uv run briefcase create macOS
 uv run briefcase build macOS
+# Local-only build
 uv run briefcase package macOS --adhoc-sign
+
+# Redistributable build (Developer ID + notarization)
+uv run briefcase package macOS --identity "Developer ID Application: <YOUR NAME> (<TEAM_ID>)" --no-notarize
+APPLE_NOTARY_PROFILE="<YOUR_NOTARY_PROFILE>" \
+  ./scripts/notarize_macos_artifact.sh --artifact "dist/SiliconRefineryChat-<VERSION>.dmg" --app-name "SiliconRefineryChat.app"
 ```
 
 Packaged artifacts are published under `artifacts/` in this repo and attached to GitHub Releases.
+
+Ad-hoc builds are for local testing only. Public distribution should always use Developer ID signing + notarization to avoid Gatekeeper malware verification warnings during install.
 
 ## Versioning
 
