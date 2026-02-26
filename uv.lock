@@ -682,7 +682,7 @@ wheels = [
 
 [[package]]
 name = "silicon-refinery-chat"
-version = "0.0.209"
+version = "0.0.210"
 source = { editable = "." }
 dependencies = [
     { name = "apple-fm-sdk" },

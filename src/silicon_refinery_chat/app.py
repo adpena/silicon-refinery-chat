@@ -726,15 +726,15 @@ class SiliconRefineryChatApp(toga.App):
         self._pending_steering_interjection = ""
         self._loading_task: asyncio.Task | None = None
         self._theme_refresh_task: asyncio.Task | None = None
-        self._send_from_keyboard_pending = False
-        self._send_from_keyboard_task: asyncio.Task | None = None
-        self._compose_key_delegate: Any | None = None
+        self._send_shortcut_task: asyncio.Task | None = None
         self._status_raw_text = ""
-        self._enter_to_send_enabled = True
+        self._enter_to_send_enabled = False
         self._loading_caption = "Inference running"
         self._loading_nonce = 0
         self.free_threading_enabled, self.runtime_threading_mode = detect_runtime_threading_mode()
-        self._enter_to_send_enabled = not self.free_threading_enabled
+        # Cocoa text command delegation through rubicon can segfault on macOS 26.x.
+        # Keep send action button-driven for release stability.
+        self._enter_to_send_enabled = False
         cpu_workers = max(2, min(8, os.cpu_count() or 4))
         worker_count = cpu_workers if self.free_threading_enabled else min(4, cpu_workers)
         self._worker_pool = ThreadPoolExecutor(
@@ -749,6 +749,7 @@ class SiliconRefineryChatApp(toga.App):
         self.model_available, self.model_unavailable_reason = self.model.is_available()
 
         self._build_ui()
+        self._install_app_commands()
         self._refresh_chat_tabs()
         self._set_idle_state()
 
@@ -956,77 +957,44 @@ class SiliconRefineryChatApp(toga.App):
 
     def _refresh_send_enabled(self) -> None:
         """Enable send only when idle and compose input has content."""
-        self.send_button.enabled = (not self.is_busy) and self._has_compose_text()
+        enabled = (not self.is_busy) and self._has_compose_text()
+        self.send_button.enabled = enabled
+        send_command = getattr(self, "send_command", None)
+        if send_command is not None:
+            send_command.enabled = enabled
 
     def on_prompt_change(self, widget: toga.Widget) -> None:
         """Update send button state when compose text changes."""
         del widget
         self._refresh_send_enabled()
 
-    async def _send_from_keyboard(self) -> None:
-        """Run send flow from keyboard shortcut without duplicate submits."""
-        try:
-            await self.on_send(self.send_button)
-        finally:
-            self._send_from_keyboard_pending = False
+    def _install_app_commands(self) -> None:
+        """Install hardened app-level commands with native shortcut wiring."""
+        self.send_command = toga.Command(
+            self._on_send_command,
+            text="Send Message",
+            shortcut=toga.Key.MOD_1 + toga.Key.ENTER,
+            tooltip="Send the current compose message",
+            group=toga.Group.EDIT,
+            section=1,
+            order=20,
+            enabled=False,
+            id="send-message",
+        )
+        self.commands.add(self.send_command)
 
-    def _queue_send_from_keyboard(self) -> None:
-        """Queue Enter-key submit as an async task."""
-        if self._send_from_keyboard_pending or self.is_busy or not self._has_compose_text():
+    def _on_send_command(self, widget: object | None = None) -> None:
+        """Handle Cmd+Enter send shortcut without Cocoa delegate interception."""
+        del widget
+        if self.is_busy or not self._has_compose_text():
+            return
+        if self._send_shortcut_task is not None and not self._send_shortcut_task.done():
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._send_from_keyboard_pending = True
-        self._send_from_keyboard_task = loop.create_task(self._send_from_keyboard())
-
-    def _install_compose_key_delegate(self) -> None:
-        """Install Cocoa delegate to map Enter=send and Shift+Enter=newline."""
-        if not self._enter_to_send_enabled:
-            return
-        try:
-            from rubicon.objc import NSObject, objc_method, objc_property  # type: ignore
-        except Exception:
-            return
-
-        impl = getattr(self.prompt_input, "_impl", None)
-        native_text = getattr(impl, "native_text", None)
-        if native_text is None:
-            return
-
-        app = self
-
-        class _ComposeKeyDelegate(NSObject):
-            interface = objc_property(object, weak=True)
-            owner = objc_property(object, weak=True)
-
-            @objc_method
-            def textDidChange_(self, notification) -> None:
-                del notification
-                self.interface.on_change()
-
-            @objc_method
-            def textView_doCommandBySelector_(self, text_view, selector) -> bool:
-                del text_view
-                selector_name = selector.name
-                if isinstance(selector_name, bytes):
-                    selector_name = selector_name.decode("utf-8", "ignore")
-                selector_name = str(selector_name)
-
-                if selector_name == "insertNewline:":
-                    if self.owner is not None:
-                        self.owner._queue_send_from_keyboard()
-                    return True
-                if selector_name in {"insertLineBreak:", "insertNewlineIgnoringFieldEditor:"}:
-                    return False
-                return False
-
-        delegate = _ComposeKeyDelegate.alloc().init()
-        delegate.interface = self.prompt_input
-        delegate.owner = app
-        native_text.delegate = delegate
-        self._compose_key_delegate = delegate
+        self._send_shortcut_task = loop.create_task(self.on_send(self.send_button))
 
     def _apply_native_textarea_theme(self, widget: toga.MultilineTextInput) -> None:
         """Apply Cocoa-native colors where backend theme mapping can override Pack colors."""
@@ -1286,7 +1254,6 @@ class SiliconRefineryChatApp(toga.App):
                 color=COLOR_TEXT_PRIMARY,
             ),
         )
-        self._install_compose_key_delegate()
         self._refresh_textarea_theme()
         self.settings_button = toga.Button(
             "Settings",
@@ -1341,7 +1308,7 @@ class SiliconRefineryChatApp(toga.App):
         )
         if not self._enter_to_send_enabled:
             self.command_hint_label.text = (
-                "Commands: /help /new /clear /export  |  Send: button only in no-gil safe mode"
+                "Commands: /help /new /clear /export  |  Send: button only for stability"
             )
 
         self.right_column = toga.Box(

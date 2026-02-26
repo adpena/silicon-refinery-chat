@@ -54,7 +54,7 @@ Ad-hoc builds are for local testing only. Public distribution should always use 
 
 ## Versioning
 
-`silicon-refinery-chat` stays version-locked with `silicon-refinery` and uses thousandth-place increments (`0.0.209` -> `0.0.210`).
+`silicon-refinery-chat` stays version-locked with `silicon-refinery` and uses thousandth-place increments (`0.0.210` -> `0.0.211`).
 
 ## License
 
