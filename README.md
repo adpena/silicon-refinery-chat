@@ -25,6 +25,13 @@ brew install silicon-refinery-chat
 silicon-refinery-chat
 ```
 
+```text
+Actual output excerpt from local run:
+
+silicon-refinery-chat 0.0.214 installed=0.0.214
+silicon-refinery 0.0.214 installed=0.0.214
+```
+
 This installs `SiliconRefineryChat.app` and a `silicon-refinery-chat` launcher command.
 
 ## Local development
@@ -43,9 +50,11 @@ uv run briefcase build macOS
 uv run briefcase package macOS --adhoc-sign
 
 # Redistributable build (Developer ID + notarization)
-uv run briefcase package macOS --identity "Developer ID Application: <YOUR NAME> (<TEAM_ID>)" --no-notarize
-APPLE_NOTARY_PROFILE="<YOUR_NOTARY_PROFILE>" \
-  ./scripts/notarize_macos_artifact.sh --artifact "dist/SiliconRefineryChat-<VERSION>.dmg" --app-name "SiliconRefineryChat.app"
+export CHAT_SIGN_IDENTITY="${CHAT_SIGN_IDENTITY:?Set your Developer ID identity string first}"
+export APPLE_NOTARY_PROFILE="${APPLE_NOTARY_PROFILE:?Set your stored notary profile name first}"
+uv run briefcase package macOS --identity "$CHAT_SIGN_IDENTITY" --no-notarize
+APPLE_NOTARY_PROFILE="$APPLE_NOTARY_PROFILE" \
+  ./scripts/notarize_macos_artifact.sh --artifact "$(ls -t dist/SiliconRefineryChat-*.dmg | head -n 1)" --app-name "SiliconRefineryChat.app"
 ```
 
 Packaged artifacts are published under `artifacts/` in this repo and attached to GitHub Releases.
@@ -55,7 +64,7 @@ The parent publish pipeline now blocks release uploads for untrusted artifacts b
 
 ## Versioning
 
-`silicon-refinery-chat` stays version-locked with `silicon-refinery` and uses thousandth-place increments (`0.0.212` -> `0.0.213`).
+`silicon-refinery-chat` stays version-locked with `silicon-refinery` and uses thousandth-place increments (`0.0.213` -> `0.0.214`).
 
 ## License
 
