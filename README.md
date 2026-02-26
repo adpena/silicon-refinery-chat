@@ -17,6 +17,16 @@ This repository is synchronized automatically from the parent project:
 - Steering interjection reruns (interrupt + inject + regenerate)
 - Nonblocking inference pipeline with UI-safe updates
 
+## Install via Homebrew
+
+```bash
+brew tap adpena/silicon-refinery https://github.com/adpena/homebrew-silicon-refinery
+brew install silicon-refinery-chat
+silicon-refinery-chat
+```
+
+This installs `SiliconRefineryChat.app` and a `silicon-refinery-chat` launcher command.
+
 ## Local development
 
 ```bash
