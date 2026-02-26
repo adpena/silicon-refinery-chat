@@ -44,6 +44,10 @@ uv run briefcase package macOS --adhoc-sign
 
 Packaged artifacts are published under `artifacts/` in this repo and attached to GitHub Releases.
 
+## Versioning
+
+`silicon-refinery-chat` stays version-locked with `silicon-refinery` and uses thousandth-place increments (`0.0.209` -> `0.0.210`).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
