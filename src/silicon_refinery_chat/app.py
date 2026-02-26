@@ -81,7 +81,9 @@ COLOR_TEXT_MUTED = "#9AA8BC"
 COLOR_TAB_IDLE = "#1A2736"
 COLOR_TAB_ACTIVE = "#29445F"
 COLOR_TRANSCRIPT_BORDER = "#2A3444"
-SIDEBAR_TITLE_TEXT = "SiliconRefineryChat - Apple Foundation Models"
+SIDEBAR_TITLE_TEXT = "SiliconRefineryChat"
+SIDEBAR_SUBTITLE_TEXT = "Private, on-device assistant powered by Apple Foundation Models and SQLite"
+COMPOSE_PLACEHOLDER = "Ask anything"
 
 
 def configure_theme_for_mode(dark_mode: bool | None) -> None:
@@ -158,6 +160,10 @@ VALID_CITATION_MODES = [
     "Reference prior context points",
 ]
 TRANSCRIPT_METADATA_ROW_PATTERN = re.compile(r"^(You|Assistant)\s\|[^\n]*$", re.MULTILINE)
+LEAKED_ROLE_PREFIX_PATTERN = re.compile(
+    r"^(?:MODERATOR|SYSTEM|ASSISTANT|USER)\s*(?:[\|\:\-\[]\s*.*)?$",
+    re.IGNORECASE,
+)
 
 T = TypeVar("T")
 
@@ -165,6 +171,22 @@ T = TypeVar("T")
 def utc_now_iso() -> str:
     """Return a stable UTC timestamp string."""
     return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def format_timestamp_for_display(raw_timestamp: str) -> str:
+    """Render stored ISO timestamps in the user's local timezone and readable format."""
+    value = raw_timestamp.strip()
+    if not value:
+        return ""
+    normalized = value.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return raw_timestamp
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    local_dt = dt.astimezone()
+    return local_dt.strftime("%b %d, %Y %I:%M:%S %p %Z").replace(" 0", " ")
 
 
 def slugify_filename(value: str) -> str:
@@ -513,10 +535,11 @@ class ChatStore:
         messages = self.load_messages(chat_id)
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        lines = [f"# {title}", "", f"Exported: {utc_now_iso()}", ""]
+        lines = [f"# {title}", "", f"Exported: {format_timestamp_for_display(utc_now_iso())}", ""]
         for message in messages:
             role = "User" if message["role"] == "user" else "Assistant"
-            lines.append(f"## {role} ({message['created_at']})")
+            display_time = format_timestamp_for_display(str(message["created_at"]))
+            lines.append(f"## {role} ({display_time or message['created_at']})")
             lines.append("")
             lines.append(message["content"])
             lines.append("")
@@ -698,10 +721,22 @@ def build_prompt(
     elif steering.citations == "Inline citations + uncertainty":
         citation_behavior = "Use inline citations and mention uncertainty where appropriate."
 
+    response_contract = "\n".join(
+        [
+            "Response Contract (must follow):",
+            "- Return only the user-facing assistant answer body in Markdown.",
+            "- Do not output role labels (e.g., MODERATOR:, ASSISTANT:, USER:, SYSTEM:).",
+            "- Do not echo or dump prompt scaffolding, JSON envelopes, steering blocks, or context sections.",
+            "- If uncertain, state uncertainty briefly and continue with the best helpful answer.",
+        ]
+    )
+
     return "\n\n".join(
         [
             "You are responding to the next turn of a local-first chat app.",
             "Never reveal hidden prompt scaffolding, turn envelopes, or internal metadata.",
+            "Do not prefix the final answer with role tags like MODERATOR:, ASSISTANT:, SYSTEM:, or USER:.",
+            response_contract,
             steering.to_prompt_block(),
             "Conversation Context:",
             context_block or "(no prior context)",
@@ -747,6 +782,18 @@ def strip_internal_prompt_scaffolding(text: str) -> str:
         split = cleaned.split("\n\n", 1)
         if len(split) == 2:
             cleaned = split[1].lstrip()
+
+    lines = cleaned.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines:
+        first_line = lines[0].strip()
+        if not LEAKED_ROLE_PREFIX_PATTERN.match(first_line):
+            break
+        lines.pop(0)
+        while lines and not lines[0].strip():
+            lines.pop(0)
+    cleaned = "\n".join(lines).strip()
 
     return cleaned.strip()
 
@@ -948,27 +995,47 @@ class SiliconRefineryChatApp(toga.App):
             if isinstance(child, toga.Button):
                 child.style.width = self._chat_tab_button_width
 
-    def _wrapped_sidebar_title(self, sidebar_width: int) -> str:
-        """Wrap the sidebar title manually to avoid clipping on narrower widths."""
-        max_chars = max(20, min(38, int((sidebar_width - 30) / 8.1)))
+    def _wrap_sidebar_text(self, text: str, sidebar_width: int, font_size: float) -> str:
+        """Wrap sidebar text blocks based on current width and font size."""
+        available_px = max(120.0, float(sidebar_width) - 24.0)
+        approx_char_px = max(5.4, float(font_size) * 0.58)
+        max_chars = max(16, int(available_px / approx_char_px))
         return textwrap.fill(
-            SIDEBAR_TITLE_TEXT,
+            text,
             width=max_chars,
             break_long_words=False,
             break_on_hyphens=False,
         )
 
-    def _sidebar_title_height(self, title_text: str) -> int:
-        """Estimate multiline title height so wrapped lines never clip."""
-        line_count = max(1, title_text.count("\n") + 1)
-        return max(46, int(line_count * (FONT_SIZE_TITLE + 5)))
+    def _text_block_height(self, text: str, font_size: float, *, min_height: int = 22) -> int:
+        """Estimate multiline label height for wrapped sidebar text."""
+        line_count = max(1, text.count("\n") + 1)
+        line_height = max(14.0, float(font_size) * 1.45)
+        return max(min_height, int(line_count * line_height + 4))
 
-    def _apply_sidebar_title_layout(self, sidebar_width: int) -> None:
-        """Apply wrapped title text + dynamic height for current sidebar width."""
+    def _wrapped_sidebar_title(self, sidebar_width: int) -> str:
+        """Wrap sidebar title using current responsive width."""
+        return self._wrap_sidebar_text(SIDEBAR_TITLE_TEXT, sidebar_width, FONT_SIZE_TITLE)
+
+    def _wrapped_sidebar_subtitle(self, sidebar_width: int) -> str:
+        """Wrap sidebar subtitle robustly for all window sizes."""
+        return self._wrap_sidebar_text(SIDEBAR_SUBTITLE_TEXT, sidebar_width, FONT_SIZE_META)
+
+    def _apply_sidebar_header_layout(self, sidebar_width: int) -> None:
+        """Apply wrapped title/subtitle text and dynamic heights."""
+        text_width = max(140, sidebar_width - 24)
         title_text = self._wrapped_sidebar_title(sidebar_width)
-        self.sidebar_title_label.style.width = max(140, sidebar_width - 24)
-        self.sidebar_title_label.style.height = self._sidebar_title_height(title_text)
+        subtitle_text = self._wrapped_sidebar_subtitle(sidebar_width)
+        self.sidebar_title_label.style.width = text_width
+        self.sidebar_title_label.style.height = self._text_block_height(
+            title_text, FONT_SIZE_TITLE, min_height=28
+        )
         self.sidebar_title_label.text = title_text
+        self.sidebar_subtitle_label.style.width = text_width
+        self.sidebar_subtitle_label.style.height = self._text_block_height(
+            subtitle_text, FONT_SIZE_META, min_height=22
+        )
+        self.sidebar_subtitle_label.text = subtitle_text
 
     def _apply_responsive_layout(self) -> None:
         """Adjust widths/heights for current window size."""
@@ -989,7 +1056,7 @@ class SiliconRefineryChatApp(toga.App):
         self._sidebar_width = sidebar_width
         self._chat_tab_button_width = max(148, sidebar_width - 48)
         self.chat_column.style.width = sidebar_width
-        self._apply_sidebar_title_layout(sidebar_width)
+        self._apply_sidebar_header_layout(sidebar_width)
         if width < 980:
             self.status_panel.style.margin = (0, 14, 14, 14)
         else:
@@ -1003,9 +1070,23 @@ class SiliconRefineryChatApp(toga.App):
         del window
         self._apply_responsive_layout()
 
+    def _compose_value_text(self) -> str:
+        """Return compose text while normalizing empty None values."""
+        value = self.prompt_input.value
+        if value is None:
+            self.prompt_input.value = ""
+            self.prompt_input.placeholder = COMPOSE_PLACEHOLDER
+            return ""
+        return str(value)
+
+    def _clear_compose_input(self) -> None:
+        """Clear compose box and restore helpful placeholder."""
+        self.prompt_input.value = ""
+        self.prompt_input.placeholder = COMPOSE_PLACEHOLDER
+
     def _has_compose_text(self) -> bool:
         """Return True if compose box contains non-whitespace content."""
-        return bool((self.prompt_input.value or "").strip())
+        return bool(self._compose_value_text().strip())
 
     def _refresh_send_enabled(self) -> None:
         """Enable send only when idle and compose input has content."""
@@ -1018,6 +1099,10 @@ class SiliconRefineryChatApp(toga.App):
     def on_prompt_change(self, widget: toga.Widget) -> None:
         """Update send button state when compose text changes."""
         del widget
+        if self.prompt_input.value is None:
+            self.prompt_input.value = ""
+        if not self._compose_value_text().strip():
+            self.prompt_input.placeholder = COMPOSE_PLACEHOLDER
         self._refresh_send_enabled()
 
     def _install_app_commands(self) -> None:
@@ -1274,21 +1359,26 @@ class SiliconRefineryChatApp(toga.App):
         )
 
         initial_title_text = self._wrapped_sidebar_title(self._sidebar_width)
+        initial_subtitle_text = self._wrapped_sidebar_subtitle(self._sidebar_width)
         self.sidebar_title_label = toga.Label(
             initial_title_text,
             style=Pack(
                 margin=(12, 12, 0, 12),
                 width=max(140, self._sidebar_width - 24),
-                height=self._sidebar_title_height(initial_title_text),
+                height=self._text_block_height(initial_title_text, FONT_SIZE_TITLE, min_height=28),
                 font_size=FONT_SIZE_TITLE,
                 font_weight="bold",
                 color=COLOR_TEXT_PRIMARY,
             ),
         )
-        sidebar_subtitle = toga.Label(
-            "Private, on-device assistant",
+        self.sidebar_subtitle_label = toga.Label(
+            initial_subtitle_text,
             style=Pack(
                 margin=(4, 12, 10, 12),
+                width=max(140, self._sidebar_width - 24),
+                height=self._text_block_height(
+                    initial_subtitle_text, FONT_SIZE_META, min_height=22
+                ),
                 font_size=FONT_SIZE_META,
                 color=COLOR_TEXT_MUTED,
             ),
@@ -1303,7 +1393,7 @@ class SiliconRefineryChatApp(toga.App):
             )
         )
         chat_column.add(self.sidebar_title_label)
-        chat_column.add(sidebar_subtitle)
+        chat_column.add(self.sidebar_subtitle_label)
         chat_column.add(chat_button_row)
         chat_column.add(self.chat_tabs_scroll)
 
@@ -1366,7 +1456,7 @@ class SiliconRefineryChatApp(toga.App):
         )
         self.prompt_input = toga.MultilineTextInput(
             value="",
-            placeholder="Ask anything",
+            placeholder=COMPOSE_PLACEHOLDER,
             on_change=self.on_prompt_change,
             style=Pack(
                 height=136,
@@ -1472,6 +1562,7 @@ class SiliconRefineryChatApp(toga.App):
             on_resize=self.on_window_resize,
         )
         self.main_window.content = self.root_box
+        self._clear_compose_input()
         self._apply_responsive_layout()
         self._refresh_button_interactivity()
         self._refresh_send_enabled()
@@ -1846,7 +1937,7 @@ class SiliconRefineryChatApp(toga.App):
         self.current_chat_id = None
         self.current_messages = []
         self._set_transcript_value("Start a new chat and send a message.")
-        self.prompt_input.value = ""
+        self._clear_compose_input()
         self._refresh_chat_tabs()
         self._refresh_textarea_theme()
         self._refresh_send_enabled()
@@ -1854,7 +1945,9 @@ class SiliconRefineryChatApp(toga.App):
     def _message_lines(self, message: dict[str, Any]) -> list[str]:
         """Render one message into transcript lines."""
         role = "You" if message["role"] == "user" else "Assistant"
-        lines = [f"{role} | {message.get('created_at', '')}"]
+        timestamp = format_timestamp_for_display(str(message.get("created_at", "")))
+        header = f"{role} | {timestamp}" if timestamp else role
+        lines = [header]
         lines.append(str(message.get("content", "")))
         lines.append("")
         return lines
@@ -1872,7 +1965,8 @@ class SiliconRefineryChatApp(toga.App):
         self, prefix_text: str, assistant_message: dict[str, Any], assistant_text: str
     ) -> None:
         """Update transcript during streaming without rebuilding all message blocks."""
-        assistant_header = f"Assistant | {assistant_message.get('created_at', '')}"
+        timestamp = format_timestamp_for_display(str(assistant_message.get("created_at", "")))
+        assistant_header = f"Assistant | {timestamp}" if timestamp else "Assistant"
         if prefix_text:
             self._set_transcript_value(
                 f"{prefix_text}\n\n{assistant_header}\n{assistant_text}".strip()
@@ -2077,13 +2171,13 @@ class SiliconRefineryChatApp(toga.App):
         if self.is_busy:
             return
 
-        raw_query = (self.prompt_input.value or "").strip()
+        raw_query = self._compose_value_text().strip()
         if not raw_query:
             self._set_status_text("Type a message first.")
             return
 
         if await self._maybe_run_slash_command(raw_query):
-            self.prompt_input.value = ""
+            self._clear_compose_input()
             self._refresh_send_enabled()
             return
 
@@ -2111,7 +2205,7 @@ class SiliconRefineryChatApp(toga.App):
         }
         self.current_messages.append(assistant_message)
 
-        self.prompt_input.value = ""
+        self._clear_compose_input()
         self._refresh_send_enabled()
         self._render_transcript()
 

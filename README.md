@@ -55,7 +55,7 @@ The parent publish pipeline now blocks release uploads for untrusted artifacts b
 
 ## Versioning
 
-`silicon-refinery-chat` stays version-locked with `silicon-refinery` and uses thousandth-place increments (`0.0.211` -> `0.0.212`).
+`silicon-refinery-chat` stays version-locked with `silicon-refinery` and uses thousandth-place increments (`0.0.212` -> `0.0.213`).
 
 ## License
 
