@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "silicon-refinery-chat"
-version = "0.0.216"
+version = "0.0.217"
 description = "Realtime local Apple Foundation Models desktop chat app built with Toga + Briefcase."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -28,7 +28,7 @@ apple-fm-sdk = { git = "https://github.com/apple/python-apple-fm-sdk" }
 [tool.briefcase]
 project_name = "SiliconRefineryChat"
 bundle = "com.siliconrefinery"
-version = "0.0.216"
+version = "0.0.217"
 license.file = "../../LICENSE"
 url = "https://github.com/adpena/silicon-refinery"
 author = "SiliconRefinery"

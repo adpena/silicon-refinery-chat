@@ -42,6 +42,7 @@ STREAM_UI_MIN_CHARS_DELTA = 8
 STREAM_UI_BREAK_CHARS = {".", "!", "?", ":", ";", "\n"}
 QUERY_PREVIEW_STEP_CHARS = 12
 QUERY_PREVIEW_INTERVAL_SECONDS = 0.008
+TRANSCRIPT_AUTOSCROLL_MIN_INTERVAL_SECONDS = 0.045
 MAX_STREAM_RESTARTS = 5
 STREAM_FIRST_CHUNK_TIMEOUT_SECONDS = 25.0
 STREAM_CHUNK_IDLE_TIMEOUT_SECONDS = 12.0
@@ -826,6 +827,11 @@ class SiliconRefineryChatApp(toga.App):
         self._loading_task: asyncio.Task | None = None
         self._theme_refresh_task: asyncio.Task | None = None
         self._send_shortcut_task: asyncio.Task | None = None
+        self._resize_settle_task: asyncio.Task | None = None
+        self._is_resizing = False
+        self._transcript_autoscroll_task: asyncio.Task | None = None
+        self._transcript_autoscroll_pending = False
+        self._last_transcript_autoscroll_at = 0.0
         self._status_raw_text = ""
         self._enter_to_send_enabled = False
         self._loading_caption = "Inference running"
@@ -920,8 +926,10 @@ class SiliconRefineryChatApp(toga.App):
         """Re-apply native textarea colors after Cocoa layout settles."""
         await asyncio.sleep(0)
         self._refresh_textarea_theme()
+        self._normalize_compose_input()
         await asyncio.sleep(0.2)
         self._refresh_textarea_theme()
+        self._normalize_compose_input()
 
     def _refresh_textarea_theme(self) -> None:
         """Apply native textarea theming to all multiline views."""
@@ -951,10 +959,9 @@ class SiliconRefineryChatApp(toga.App):
     def _wrap_status_text(self, text: str) -> str:
         """Wrap status text for narrow windows while preserving readability."""
         width = self._window_width()
-        if width >= 980:
-            return text
-        available = max(300, width - self._sidebar_width - 120)
-        max_chars = max(38, int(available / 7.2))
+        # Wrap only against the real container width budget (no artificial max line cap).
+        available = max(120, width - self._sidebar_width - 120)
+        max_chars = max(18, int(available / 7.2))
         wrapped_lines = [
             textwrap.fill(
                 line,
@@ -977,14 +984,18 @@ class SiliconRefineryChatApp(toga.App):
 
     def _initial_window_size(self) -> tuple[int, int]:
         """Compute an on-screen-safe initial window size."""
-        default = (980, 520)
+        default = (825, 618)
         try:
             screen = self.screens[0]
             screen_size = screen.size
             sw = int(getattr(screen_size, "width", screen_size[0]))
             sh = int(getattr(screen_size, "height", screen_size[1]))
-            width = max(780, min(1100, int(sw * 0.72)))
-            height = max(430, min(700, int(sh * 0.55)))
+            previous_width_target = min(1100, int(sw * 0.72))
+            # Initialize at ~75% of prior width behavior with no additional width floor.
+            width = int(previous_width_target * 0.75)
+            desired_height = int(width * 0.75)  # Prefer a 4:3 startup aspect ratio.
+            max_height = min(700, int(sh * 0.70))
+            height = max(430, min(max_height, desired_height))
             return (width, height)
         except Exception:
             return default
@@ -1044,32 +1055,14 @@ class SiliconRefineryChatApp(toga.App):
 
     def _apply_responsive_layout(self) -> None:
         """Adjust widths/heights for current window size."""
-        width = self._window_width()
         height = self._window_height()
-        sidebar_width = max(220, min(350, int(width * 0.29)))
-        chat_tabs_height = max(190, min(420, int(height * 0.62)))
-        if width < 1024 or height < 680:
-            sidebar_width = max(200, min(286, int(width * 0.33)))
-            self.transcript_view.style.height = 232
-            self.prompt_input.style.height = 112
-            chat_tabs_height = max(170, min(340, int(height * 0.56)))
-        else:
-            self.transcript_view.style.height = 302
-            self.prompt_input.style.height = 120
-        if height < 560:
-            self.transcript_view.style.height = 176
-            self.prompt_input.style.height = 88
-            chat_tabs_height = max(140, min(280, int(height * 0.50)))
+        sidebar_width = self._sidebar_width
+        self.prompt_input.style.height = max(88, min(136, int(height * 0.19)))
 
-        self._sidebar_width = sidebar_width
         self._chat_tab_button_width = max(148, sidebar_width - 48)
         self.chat_column.style.width = sidebar_width
-        self.chat_tabs_scroll.style.height = chat_tabs_height
         self._apply_sidebar_header_layout(sidebar_width)
-        if width < 980:
-            self.status_panel.style.margin = (0, 14, 14, 14)
-        else:
-            self.status_panel.style.margin = (12, 14, 14, 14)
+        self._normalize_compose_input()
         self._apply_chat_tab_button_width()
         self._refresh_status_text_layout()
         self._refresh_button_interactivity()
@@ -1077,21 +1070,49 @@ class SiliconRefineryChatApp(toga.App):
     async def on_window_resize(self, window: toga.Window) -> None:
         """Resize handler that keeps the app readable across widths."""
         del window
+        self._is_resizing = True
         self._apply_responsive_layout()
+        task = self._resize_settle_task
+        if task is not None and not task.done():
+            task.cancel()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._is_resizing = False
+            return
+        self._resize_settle_task = loop.create_task(self._settle_resize_state())
+
+    async def _settle_resize_state(self) -> None:
+        """Mark resize as settled after event bursts and resume deferred autoscroll."""
+        task = asyncio.current_task()
+        try:
+            await asyncio.sleep(0.14)
+            self._is_resizing = False
+            if self._transcript_autoscroll_pending:
+                self._schedule_transcript_autoscroll()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._resize_settle_task is task:
+                self._resize_settle_task = None
+
+    def _normalize_compose_input(self) -> None:
+        """Normalize compose box state so empty content always shows placeholder text."""
+        if self.prompt_input.value is None:
+            self.prompt_input.value = ""
+        if not str(self.prompt_input.value or "").strip():
+            self.prompt_input.placeholder = COMPOSE_PLACEHOLDER
 
     def _compose_value_text(self) -> str:
         """Return compose text while normalizing empty None values."""
-        value = self.prompt_input.value
-        if value is None:
-            self.prompt_input.value = ""
-            self.prompt_input.placeholder = COMPOSE_PLACEHOLDER
-            return ""
-        return str(value)
+        self._normalize_compose_input()
+        return str(self.prompt_input.value or "")
 
     def _clear_compose_input(self) -> None:
         """Clear compose box and restore helpful placeholder."""
         self.prompt_input.value = ""
         self.prompt_input.placeholder = COMPOSE_PLACEHOLDER
+        self._normalize_compose_input()
 
     def _has_compose_text(self) -> bool:
         """Return True if compose box contains non-whitespace content."""
@@ -1108,10 +1129,7 @@ class SiliconRefineryChatApp(toga.App):
     def on_prompt_change(self, widget: toga.Widget) -> None:
         """Update send button state when compose text changes."""
         del widget
-        if self.prompt_input.value is None:
-            self.prompt_input.value = ""
-        if not self._compose_value_text().strip():
-            self.prompt_input.placeholder = COMPOSE_PLACEHOLDER
+        self._normalize_compose_input()
         self._refresh_send_enabled()
 
     def _install_app_commands(self) -> None:
@@ -1224,7 +1242,7 @@ class SiliconRefineryChatApp(toga.App):
             if layer is not None:
                 if is_transcript:
                     layer.borderWidth = 1.0
-                    layer.cornerRadius = 6.0
+                    layer.cornerRadius = 0.0
                     layer.borderColor = border.CGColor
                 else:
                     layer.borderWidth = 0.0
@@ -1280,6 +1298,47 @@ class SiliconRefineryChatApp(toga.App):
         """Set transcript text and apply metadata emphasis when supported."""
         self.transcript_view.value = text
         self._apply_transcript_metadata_typography()
+        self._schedule_transcript_autoscroll()
+
+    def _schedule_transcript_autoscroll(self) -> None:
+        """Debounce transcript autoscroll to stay responsive during token streaming."""
+        self._transcript_autoscroll_pending = True
+        if self._is_resizing:
+            return
+        task = self._transcript_autoscroll_task
+        if task is not None and not task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._flush_transcript_autoscroll()
+            return
+        self._transcript_autoscroll_task = loop.create_task(self._run_transcript_autoscroll())
+
+    async def _run_transcript_autoscroll(self) -> None:
+        """Process queued autoscroll requests without blocking the UI thread."""
+        try:
+            while True:
+                if self._is_resizing:
+                    await asyncio.sleep(TRANSCRIPT_AUTOSCROLL_MIN_INTERVAL_SECONDS)
+                    continue
+                self._transcript_autoscroll_pending = False
+                elapsed = time.monotonic() - self._last_transcript_autoscroll_at
+                remaining = TRANSCRIPT_AUTOSCROLL_MIN_INTERVAL_SECONDS - elapsed
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                self._flush_transcript_autoscroll()
+                await asyncio.sleep(0)
+                if not self._transcript_autoscroll_pending:
+                    break
+        finally:
+            self._transcript_autoscroll_task = None
+
+    def _flush_transcript_autoscroll(self) -> None:
+        """Scroll transcript to newest content and update timing guard."""
+        with contextlib.suppress(Exception):
+            self.transcript_view.scroll_to_bottom()
+        self._last_transcript_autoscroll_at = time.monotonic()
 
     def _apply_transcript_metadata_typography(self) -> None:
         """Bold transcript metadata rows while keeping message bodies regular weight."""
@@ -1361,7 +1420,7 @@ class SiliconRefineryChatApp(toga.App):
             vertical=True,
             content=self.chat_tabs_box,
             style=Pack(
-                height=300,
+                flex=1,
                 margin=(0, 10, 12, 10),
                 background_color=COLOR_PANEL_BG,
             ),
@@ -1397,7 +1456,7 @@ class SiliconRefineryChatApp(toga.App):
             style=Pack(
                 direction=COLUMN,
                 width=self._sidebar_width,
-                margin=(12, 10, 12, 12),
+                margin=0,
                 background_color=COLOR_SIDEBAR_BG,
             )
         )
@@ -1412,7 +1471,7 @@ class SiliconRefineryChatApp(toga.App):
                 flex=1,
                 color=COLOR_TEXT_SECONDARY,
                 font_size=FONT_SIZE_BODY,
-                margin=(2, 8, 0, 8),
+                margin=(6, 12, 2, 12),
             ),
         )
         self.loading_spinner = toga.ActivityIndicator(
@@ -1420,7 +1479,7 @@ class SiliconRefineryChatApp(toga.App):
             style=Pack(
                 width=14,
                 height=14,
-                margin=(0, 10, 0, 8),
+                margin=(0, 12, 0, 6),
                 visibility=HIDDEN,
             ),
         )
@@ -1429,7 +1488,7 @@ class SiliconRefineryChatApp(toga.App):
             style=Pack(
                 color=COLOR_ACCENT,
                 font_size=FONT_SIZE_META,
-                margin=(2, 8, 4, 8),
+                margin=(0, 12, 6, 12),
                 visibility=HIDDEN,
             ),
         )
@@ -1446,7 +1505,7 @@ class SiliconRefineryChatApp(toga.App):
             style=Pack(
                 direction=ROW,
                 align_items="center",
-                margin=(12, 14, 14, 14),
+                margin=(0, 14, 14, 14),
                 background_color=COLOR_ACCENT_SOFT,
             )
         )
@@ -1456,7 +1515,7 @@ class SiliconRefineryChatApp(toga.App):
         self.transcript_view = toga.MultilineTextInput(
             readonly=True,
             style=Pack(
-                height=252,
+                flex=1,
                 margin=(0, 14, 14, 14),
                 background_color=COLOR_APP_BG,
                 font_size=FONT_SIZE_TEXTAREA,
@@ -1469,7 +1528,7 @@ class SiliconRefineryChatApp(toga.App):
             on_change=self.on_prompt_change,
             style=Pack(
                 height=136,
-                margin=(0, 0, 10, 0),
+                margin=(0, 14, 0, 14),
                 background_color=COLOR_TEXTAREA_BG,
                 font_size=FONT_SIZE_TEXTAREA,
                 color=COLOR_TEXT_PRIMARY,
@@ -1480,7 +1539,6 @@ class SiliconRefineryChatApp(toga.App):
             "Settings",
             on_press=self.on_open_settings,
             style=Pack(
-                flex=1,
                 margin=(6, 8, 6, 0),
                 background_color=COLOR_PANEL_BG,
                 color=COLOR_TEXT_PRIMARY,
@@ -1492,7 +1550,6 @@ class SiliconRefineryChatApp(toga.App):
             "Export",
             on_press=self.on_export_chat,
             style=Pack(
-                flex=1,
                 margin=(6, 8, 6, 0),
                 background_color=COLOR_PANEL_BG,
                 color=COLOR_TEXT_PRIMARY,
@@ -1503,7 +1560,6 @@ class SiliconRefineryChatApp(toga.App):
             "Send",
             on_press=self.on_send,
             style=Pack(
-                flex=1,
                 margin=(6, 0, 6, 8),
                 background_color=COLOR_ACCENT,
                 color="#FFFFFF",
@@ -1513,7 +1569,11 @@ class SiliconRefineryChatApp(toga.App):
         )
 
         self.action_row = toga.Box(
-            style=Pack(direction=ROW, margin=(4, 0, 0, 0), background_color=COLOR_APP_BG)
+            style=Pack(
+                direction=ROW,
+                margin=(0, 14, 0, 0),
+                background_color=COLOR_APP_BG,
+            )
         )
         self.action_row.add(self.settings_button)
         self.action_row.add(self.export_button)
@@ -1524,45 +1584,43 @@ class SiliconRefineryChatApp(toga.App):
             style=Pack(
                 font_size=FONT_SIZE_META,
                 color=COLOR_TEXT_MUTED,
-                margin=(0, 2, 2, 2),
+                margin=(0, 0, 0, 0),
             ),
         )
         if not self._enter_to_send_enabled:
             self.command_hint_label.text = (
-                "Commands: /help /new /clear /export  |  Send: button only for stability"
+                "Commands: /help /new /clear /export\nSend: button only for stability"
             )
 
         self.right_column = toga.Box(
-            style=Pack(direction=COLUMN, flex=1, background_color=COLOR_APP_BG)
+            style=Pack(
+                direction=COLUMN, flex=1, margin=(0, 0, 0, 12), background_color=COLOR_APP_BG
+            )
         )
         self.right_column.add(self.status_panel)
         self.right_column.add(self.transcript_view)
-        self.right_scroll = toga.ScrollContainer(
-            horizontal=False,
-            vertical=True,
-            content=self.right_column,
-            style=Pack(
-                flex=1,
-                margin=(12, 12, 2, 4),
-                background_color=COLOR_APP_BG,
-            ),
+        self.right_column.add(self.prompt_input)
+        self.bottom_hint_column = toga.Box(
+            style=Pack(direction=COLUMN, flex=1, margin=(0, 0, 0, 0), background_color=COLOR_APP_BG)
         )
-        self.right_bottom_controls = toga.Box(
-            style=Pack(direction=COLUMN, margin=(4, 12, 12, 12), background_color=COLOR_APP_BG)
+        self.bottom_hint_column.add(self.command_hint_label)
+        self.top_row = toga.Box(
+            style=Pack(direction=ROW, flex=1, margin=(12, 12, 2, 12), background_color=COLOR_APP_BG)
         )
-        self.right_bottom_controls.add(self.prompt_input)
-        self.right_bottom_controls.add(self.command_hint_label)
-        self.right_bottom_controls.add(self.action_row)
-        self.right_pane = toga.Box(
+        self.top_row.add(chat_column)
+        self.top_row.add(self.right_column)
+        self.bottom_row = toga.Box(
+            style=Pack(direction=ROW, margin=(6, 12, 12, 12), background_color=COLOR_APP_BG)
+        )
+        self.bottom_row.add(self.bottom_hint_column)
+        self.bottom_row.add(self.action_row)
+
+        self.root_box = toga.Box(
             style=Pack(direction=COLUMN, flex=1, background_color=COLOR_APP_BG)
         )
-        self.right_pane.add(self.right_scroll)
-        self.right_pane.add(self.right_bottom_controls)
-
-        self.root_box = toga.Box(style=Pack(direction=ROW, flex=1, background_color=COLOR_APP_BG))
         self.chat_column = chat_column
-        self.root_box.add(self.chat_column)
-        self.root_box.add(self.right_pane)
+        self.root_box.add(self.top_row)
+        self.root_box.add(self.bottom_row)
 
         self.main_window = toga.MainWindow(
             title=self.formal_name,
@@ -2371,6 +2429,13 @@ class SiliconRefineryChatApp(toga.App):
             self._theme_refresh_task.cancel()
         if self._loading_task is not None and not self._loading_task.done():
             self._loading_task.cancel()
+        if self._resize_settle_task is not None and not self._resize_settle_task.done():
+            self._resize_settle_task.cancel()
+        if (
+            self._transcript_autoscroll_task is not None
+            and not self._transcript_autoscroll_task.done()
+        ):
+            self._transcript_autoscroll_task.cancel()
         self._worker_pool.shutdown(wait=False, cancel_futures=True)
         self.store.close()
         return True
