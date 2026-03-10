@@ -68,4 +68,4 @@ The parent publish pipeline now blocks release uploads for untrusted artifacts b
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).
